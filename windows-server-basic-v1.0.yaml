@@ -1,0 +1,205 @@
+formatVersion: 1
+inputs:
+  hostname:
+    type: string
+    title: Hostname
+    description: The name of the virtual machine
+  osversion:
+    type: string
+    title: Windows Version
+    description: Choose what version of windows
+    default: windows-server-2022
+    oneOf:
+      - title: Windows 2019
+        const: windows-server-2019
+      - title: Windows 2022
+        const: windows-server-2022
+  size:
+    type: string
+    title: VM Size
+    description: |-
+      <b> Select the size of deployment </b></br>
+      Small: 1 vCPU - 2GB ram - 40GB disk </br>
+      Medium: 2 vCPU - 4GB ram - 40GB disk </br>
+      Large: 4 vCPU - 16GB ram - 40GB disk </br>
+    enum:
+      - small
+      - medium
+      - large
+    default: medium
+  environment:
+    type: string
+    title: Environment
+    oneOf:
+      - title: Development
+        const: development
+      - title: Production
+        const: production
+  costcenter:
+    type: integer
+    title: Cost Center
+    minLength: 5
+    maxLength: 5
+  backup:
+    type: string
+    default: backup:24h31d
+    oneOf:
+      - title: 12 hours, 31 day retention
+        const: backup:12h31d
+      - title: 24 hours, 31 day retention
+        const: backup:24h31d
+      - title: none
+        const: backup:declined
+  datadisk:
+    type: integer
+    title: Datadisk size
+    minimum: 0
+    maximum: 1000
+    default: 0
+  ad_user:
+    type: string
+    title: AD User
+    description: Provide the ad user that should be permitted RDP login and Administration priviliges.
+    default: ""
+resources:
+  Network:
+    type: Cloud.vSphere.Network
+    properties:
+      networkType: existing
+      constraints:
+        - tag: env:${input.environment}
+  Cloud_vSphere_Disk_1:
+    type: Cloud.vSphere.Disk
+    allocatePerInstance: true
+    properties:
+      capacityGb: ${input.datadisk}
+  Cloud_vSphere_Machine_1:
+    type: Cloud.vSphere.Machine
+    properties:
+      tags:
+        - key: costcenter
+          value: ${input.costcenter}
+        - key: dtap
+          value: ${input.environment}
+        - key: backup
+          value: ${input.backup}
+      image: ${input.osversion}
+      flavor: ${input.size}
+      networks:
+        - network: ${resource.Network.id}
+      attachedDisks:
+        - source: ${resource.Cloud_vSphere_Disk_1.id}
+      cloudConfig: |
+        Content-Type: multipart/mixed; boundary="==NewPart=="
+        MIME-Version: 1.0
+
+        --==NewPart==
+        Content-Type: text/cloud-config; charset="us-ascii"
+        MIME-Version: 1.0
+        Content-Transfer-Encoding: 7bit
+        Content-Disposition: attachment; filename="cloud-config"
+
+        set_hostname: ${input.hostname}
+
+        --==NewPart==
+        Content-Type: text/x-shellscript; charset="us-ascii"
+        MIME-Version: 1.0
+        Content-Transfer-Encoding: 7bit
+        Content-Disposition: attachment; filename="INIT.ps1"
+
+        #ps1_sysnative
+
+        function CustomLog ($LogMessage) {
+          $LogFilePath = "C:\Program Files\Cloudbase Solutions\Cloudbase-Init\log\CustomLog.txt"
+          Write-Output "$((Get-Date).ToString('T')) $LogMessage" | Out-File -FilePath $LogFilePath -Append
+        }
+
+        function DomainDnsTest {
+          $DomainDnsTestResult = (Test-NetConnection -ComputerName "${propgroup.defaultServerValues.domain}" -Port 389).TcpTestSucceeded
+          return $DomainDnsTestResult
+        }
+
+        function DomainJoinStatus {
+          $DomainJoinStatusResult = (Get-WmiObject -Class Win32_ComputerSystem).PartOfDomain
+          return $DomainJoinStatusResult
+        }
+
+        function WaitForNetwork {
+          CustomLog("-- Starting WaitForNetwork. Starting status $((Get-NetAdapter -Name Ethernet0).Status)")
+          While ((Get-NetAdapter -Name Ethernet0).Status -ne "Up") {
+            CustomLog("-- Waiting for network Ethernet0 to be up. Current status $((Get-NetAdapter -Name Ethernet0).Status)")
+            Start-Sleep -Seconds 2
+          }
+          CustomLog("-- Ending WaitForNetwork. Ending status $((Get-NetAdapter -Name Ethernet0).Status)")
+        }
+
+        function WaitForDns {
+          CustomLog("-- Starting WaitForDns. Starting status $(DomainDnsTest)")
+          While ((DomainDnsTest) -ne "True") {
+            CustomLog("-- Waiting for DNS to succeed. Current status $(DomainDnsTest)")
+            Start-Sleep -Seconds 2
+          }
+          CustomLog("-- Ending WaitForDns. Ending status $(DomainDnsTest)")
+        }
+
+        function JoinDomain {
+          CustomLog("-- Starting JoinDomain")
+          WaitForNetwork
+          WaitForDns
+          $DomainJoinCreds = New-Object System.Management.Automation.PSCredential "${propgroup.defaultServerValues.adSvcAccount}@${propgroup.defaultServerValues.domain}" ,(ConvertTo-SecureString -String "${secret.adSvcAccountPassword}" -AsPlainText -Force)
+          Add-Computer -DomainName "${propgroup.defaultServerValues.domain}" -Credential $DomainJoinCreds -Restart:$false -Force
+          CustomLog("-- Ending JoinDomain")
+        }
+
+        function WaitForDomainJoin {
+          CustomLog("-- Starting WaitForDomainJoin. Starting status $(DomainJoinStatus)")
+          While ((DomainJoinStatus) -ne "True") {
+            CustomLog("---- Waiting for Domain to be True. Current status $(DomainJoinStatus)")
+            CustomLog("---- Starting Sleep")
+            Start-Sleep -Seconds 10
+            CustomLog("---- Ending Sleep")
+            JoinDomain
+          }
+          CustomLog("-- Ending WaitForDomainJoin. Ending status $(DomainJoinStatus)")
+        }
+
+        CustomLog("Set Local Firewall - Started")
+        Set-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv4-In)" -enabled True
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'NV Domain' -Value "${propgroup.defaultServerValues.domain}"
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name SyncDomainWithMembership -Value "0"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -value 0
+        CustomLog("Set Local Firewall - Finished")
+
+        CustomLog("Initialise Disk - Started")
+        Get-Disk | Where-Object PartitionStyle -Eq "RAW" | Initialize-Disk -PassThru | New-Partition -AssignDriveLetter -UseMaximumSize | Format-Volume -NewFileSystemLabel "DATA"
+        CustomLog("Initialise Disk - Finished")
+
+        CustomLog("Set DNS Settings - Started")
+        Get-NetAdapter | Set-DnsClient -RegisterThisConnectionsAddress $False
+        Get-NetAdapter | Set-DnsClient -UseSuffixWhenRegistering $False
+        Get-NetAdapter | Set-DnsClient -ConnectionSpecificSuffix ${propgroup.defaultServerValues.domain}
+        Set-DnsClientGlobalSetting -SuffixSearchList @(${propgroup.defaultServerValues.search})
+        CustomLog("Set DNS Settings - Finished")
+
+        CustomLog("Domain Join - Started")
+        WaitForDomainJoin
+        CustomLog("Domain Join - Finished")
+
+        CustomLog("Tidying Logs - Started")
+        (Get-Content "C:\Program Files\Cloudbase Solutions\Cloudbase-Init\log\cloudbase-init.log") -replace "${secret.adSvcAccountPassword}","<DOMAIN-JOIN-PASSWORD>" | Set-Content "C:\Program Files\Cloudbase Solutions\Cloudbase-Init\log\cloudbase-init.log" -Verbose
+        CustomLog("Tidying Logs - Finished")
+
+        CustomLog("Adding user priviliges - Started")
+        add-LocalGroupMember -Group "Remote Desktop Users" -Member "${propgroup.defaultServerValues.domain}\${input.ad_user}"
+        add-LocalGroupMember -Group "Administrators" -Member "${propgroup.defaultServerValues.domain}\${input.ad_user}"
+        CustomLog("Adding user priviliges - Finished")
+
+        CustomLog("Ejecting CD Drives - Started")
+        $drives = Get-WmiObject Win32_Volume -Filter "DriveType=5"
+        $drives | ForEach-Object { (New-Object -ComObject Shell.Application).Namespace(17).ParseName($_.Name).InvokeVerb("Eject") } -ErrorAction SilentlyContinue
+        CustomLog("Ejecting CD Drives - Finished")
+
+        CustomLog("Preparing to Reboot - Started")
+        shutdown /r /t 10
+        CustomLog("Preparing to Reboot - Finished")
