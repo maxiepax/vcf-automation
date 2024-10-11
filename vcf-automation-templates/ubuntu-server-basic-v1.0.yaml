@@ -123,6 +123,7 @@ resources:
         - sudo pam-auth-update --enable mkhomedir
         - wget https://${propgroup.defaultServerValues.loginsight}/api/v1/agent/packages/types/deb --no-check-certificate -O /tmp/liagent-current.deb --quiet
         - SERVERHOST=${propgroup.defaultServerValues.loginsight} SERVERPROTO=cfapi SERVERPORT=9000 LIAGENT_AUTOUPDATE=yes LIAGENT_SSL=no dpkg -i /tmp/liagent-current.deb > /dev/null 2>&1
+        - sudo userdel -r ubuntu
         power_state:
           delay: now
           mode: reboot
